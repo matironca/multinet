@@ -1,0 +1,8 @@
+#!/bin/bash
+
+NS=$1
+shift
+
+USER_NAME=$(logname)
+
+exec ip netns exec "$NS" runuser -u "$USER_NAME" -- "$@"
