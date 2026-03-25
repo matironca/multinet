@@ -284,13 +284,13 @@ def configure_host_routing(idx, veth_host, ip_host, subnet, dev):
             "ip", "route", "add", "default", "via", 
             gateway, "dev", dev,"table", table_id], check=True)
 
-        # Rule: traffic from subnet → use table 100
+        # Rule
         subprocess.run([
             "ip", "rule", "add",
             "from", subnet, "table", table_id
         ], check=True)
 
-        # NAT (important for internet access)
+        # NAT
         subprocess.run([
             "iptables", "-t", "nat", "-A", "POSTROUTING",
             "-s", subnet, "-o", dev, "-j", "MASQUERADE"
