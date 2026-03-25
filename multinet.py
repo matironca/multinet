@@ -422,8 +422,26 @@ def list_multinet_namespaces():
             namespaces.append(name)
 
     return namespaces
-    
+def autorun(dev, command):
+    try:
+        if not is_interface_up(dev):
+            print("Interface", dev, "is down")
+            return
+        if hasSolonet(dev):
+            launch_on_dev(dev,command)
+        else:
+            mk_namespace(dev)
+            launch_on_dev(dev,command)
+    except Exception as e:
+        print(e)
+        return
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "-a":
+        dev = sys.argv[2]
+        command = sys.argv[3]
+        autorun(dev, command)
+        return
+    
     if len(sys.argv) > 1 and sys.argv[1] == "--restore":
         restore_namespaces()
         return
