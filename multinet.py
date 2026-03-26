@@ -66,6 +66,9 @@ def restore_namespaces():
 
 def launch_on_dev(dev, command):
     ns = get_namespace_for_dev(dev)
+    idx = extract_idx_from_ns(ns)
+
+    update_host_routing(dev, idx)
 
     if ns is None:
         print(f"No namespace found for device '{dev}'")
@@ -103,7 +106,19 @@ def get_namespace_for_dev(dev):
         if ns.startswith(f"mnet_{dev}_"):
             return ns
     return None
+def extract_idx_from_ns(ns):
+    if not ns.startswith("mnet_"):
+        raise ValueError(f"Invalid namespace format: {ns}")
 
+    parts = ns.split("_")
+
+    if len(parts) < 3:
+        raise ValueError(f"Invalid namespace format: {ns}")
+
+    try:
+        return int(parts[-1])
+    except ValueError:
+        raise ValueError(f"Invalid index in namespace: {ns}")
 def create_solonet(): 
     # Guides the user for the creation of network namespace using mk_namespace()
     print("Please select the network interface: \n")
@@ -160,7 +175,9 @@ def mk_namespace(dev):
         
         # DNS
         subprocess.run(["sudo", "mkdir", "-p", f"/etc/netns/{ns}"], check=True)
-        subprocess.run(["sudo", "cp", "/etc/resolv.conf", f"/etc/netns/{ns}/resolv.conf"],check=True) 
+        with open(f"/etc/netns/{ns}/resolv.conf", "w") as f:
+            f.write("nameserver 1.1.1.1\n")
+        #subprocess.run(["sudo", "cp", "/etc/resolv.conf", f"/etc/netns/{ns}/resolv.conf"],check=True) 
         
         # Save to config
         config = load_config()
@@ -168,7 +185,6 @@ def mk_namespace(dev):
         save_config(config)
 
         print(f"Namespace '{ns}' ready using {dev}")
-
     except Exception as e:
         print(f"Error creating namespace: {e}")
         return
@@ -315,17 +331,8 @@ def get_gateway(dev):
 
         parts = line.split()
 
-
-        if "via" not in parts:
-            continue
-        gw = parts[parts.index("via") + 1]
-
-    return gw
-
-    parts = result.stdout.split()
-
-    if "via" in parts:
-        return parts[parts.index("via") + 1]
+        if "via" in parts:
+            return parts[parts.index("via") + 1]
 
     return None
 
@@ -440,17 +447,126 @@ def list_multinet_namespaces():
     return namespaces
 def autorun(dev, command):
     try:
-        if not is_interface_up(dev):
-            print("Interface", dev, "is down")
-            return
-        if hasSolonet(dev):
-            launch_on_dev(dev,command)
-        else:
+        set_interface_up(dev)
+        if not hasSolonet(dev):
             mk_namespace(dev)
-            launch_on_dev(dev,command)
+        ns = get_namespace_for_dev(dev)
+        idx = extract_idx_from_ns(ns)
+        update_host_routing(dev,idx)
+        launch_on_dev(dev,command)
     except Exception as e:
         print(e)
         return
+
+def set_interface_up(dev):
+        if not is_wifi(dev):
+            subprocess.run(["nmcli", "device", "connect", dev], check=True)
+        return
+
+def is_wifi(dev):
+    return dev.startswith("wl")
+
+def update_host_routing(dev, idx):
+
+    table_id = str(100 + idx)
+    subnet = f"10.200.{idx}.0/24"
+    veth_host = f"veth_{dev[:3]}_{idx}_h"
+    ip_host = f"10.200.{idx}.1/24"
+
+    print(f"[update_host_routing] Updating routing for dev={dev}, idx={idx}")
+
+    gw = get_gateway(dev)
+    if gw is None:
+        print(f"[update_host_routing] No gateway found for {dev}")
+        return
+
+    try:
+        subprocess.run(
+            ["ip", "addr", "replace", ip_host, "dev", veth_host],
+            check=False
+        )
+        subprocess.run(
+            ["ip", "link", "set", veth_host, "up"],
+            check=False
+        )
+    except Exception as e:
+        print(f"[update_host_routing] Warning (veth setup): {e}")
+
+    try:
+        subprocess.run(
+            ["ip", "route", "replace", "default",
+             "via", gw, "dev", dev, "table", table_id],
+            check=False
+        )
+    except Exception as e:
+        print(f"[update_host_routing] Warning (route): {e}")
+
+    try:
+        if not ip_rule_exists(subnet, table_id):
+            subprocess.run(
+                ["ip", "rule", "add", "from", subnet, "table", table_id],
+                check=False
+            )
+    except Exception as e:
+        print(f"[update_host_routing] Warning (rule): {e}")
+
+    try:
+        if not nat_rule_exists(subnet, dev):
+            subprocess.run(
+                ["iptables", "-t", "nat", "-A", "POSTROUTING",
+                 "-s", subnet, "-o", dev, "-j", "MASQUERADE"],
+                check=False
+            )
+    except Exception as e:
+        print(f"[update_host_routing] Warning (NAT): {e}")
+
+    print(f"[update_host_routing] Done for dev={dev}, idx={idx}")
+
+def ip_rule_exists(subnet, table_id):
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["ip", "rule", "show"],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+
+        for line in result.stdout.splitlines():
+            if f"from {subnet}" in line and f"lookup {table_id}" in line:
+                return True
+
+    except Exception as e:
+        print(f"[ip_rule_exists] Error: {e}")
+
+    return False
+
+def nat_rule_exists(subnet, dev):
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["iptables", "-t", "nat", "-S"],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+
+        for line in result.stdout.splitlines():
+            if (
+                "-A POSTROUTING" in line and
+                f"-s {subnet}" in line and
+                f"-o {dev}" in line and
+                "-j MASQUERADE" in line
+            ):
+                return True
+
+    except Exception as e:
+        print(f"[nat_rule_exists] Error: {e}")
+
+    return False
+
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == "-a":
         dev = sys.argv[2]
