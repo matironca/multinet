@@ -301,10 +301,26 @@ def configure_host_routing(idx, veth_host, ip_host, subnet, dev):
 
 def get_gateway(dev):
     result = subprocess.run(
-        ["ip", "route", "get", "1.1.1.1"],
+        ["ip", "route", "show", "table", "main"],
         capture_output=True,
         text=True
     )
+
+    for line in result.stdout.splitlines():
+        if not line.startswith("default"):
+            continue
+
+        if f"dev {dev}" not in line:
+            continue
+
+        parts = line.split()
+
+
+        if "via" not in parts:
+            continue
+        gw = parts[parts.index("via") + 1]
+
+    return gw
 
     parts = result.stdout.split()
 
