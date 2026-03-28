@@ -2,6 +2,8 @@
 A python script that uses linux namespaces to take advantage of multiple network interfaces at the same time.
 It lets you launch programs on a namespace with access only to the desired network interface, I call that a... SOLONET!
 
+So, by the use of multiple solonets you can make use to multiple networks at the same time!
+
 ### Initial setup
 Use visudo to add the next line to your sudoers file:
 ```
