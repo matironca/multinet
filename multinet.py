@@ -143,7 +143,7 @@ def list_network_interfaces():
     # Lists available network interfaces by reading /sys/class/net/
     try:
         # Get all interfaces in /sys/class/net and remove 'lo'
-        return [iface for iface in os.listdir('/sys/class/net/') if iface != 'lo']
+        return [iface for iface in os.listdir('/sys/class/net/') if iface != 'lo' and not iface.startswith(f"veth_")]
     except FileNotFoundError:
         # If the directory doesn't exist, return an empty list
         return []
