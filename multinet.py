@@ -66,13 +66,12 @@ def restore_namespaces():
 
 def launch_on_dev(dev, command):
     ns = get_namespace_for_dev(dev)
-    idx = extract_idx_from_ns(ns)
-
-    update_host_routing(dev, idx)
-
     if ns is None:
         print(f"No namespace found for device '{dev}'")
         return
+    idx = extract_idx_from_ns(ns)
+
+    update_host_routing(dev, idx)
 
     cmd = shlex.split(command)
 
