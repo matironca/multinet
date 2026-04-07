@@ -4,9 +4,25 @@ import os
 import sys
 import shlex
 import json
+import socket
+import struct
+import threading
+import time
 
 CONFIG_PATH = os.path.expanduser("~/.multinet.json")
 EXEC_PATH = os.path.dirname(os.path.abspath(sys.argv[0])) + "/multinet-exec"
+
+# Netlink constants
+NETLINK_ROUTE = 0
+RTM_NEWLINK = 16
+RTM_DELLINK = 17
+IFLA_OPERSTATE = 16
+IFLA_IFNAME = 3  # Interface name
+IF_OPER_DOWN = 0
+IF_OPER_LOWERLAYERDOWN = 1
+IF_OPER_TESTING = 2
+IF_OPER_DORMANT = 3
+IF_OPER_UP = 4
 def load_config():
     if not os.path.exists(CONFIG_PATH):
         return []
@@ -566,6 +582,138 @@ def nat_rule_exists(subnet, dev):
 
     return False
 
+
+def monitor_interface_events(stop_event):
+    """Monitor network interface state changes via netlink socket"""
+    try:
+        # Create netlink socket
+        sock = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, NETLINK_ROUTE)
+        sock.bind((0, 0))
+
+        print("[monitor] Started interface monitoring")
+
+        while not stop_event.is_set():
+            try:
+                # Receive message
+                msg = sock.recv(4096)
+
+                # Parse netlink message
+                offset = 0
+                while offset < len(msg):
+                    # Netlink header: length, type, flags, seq, pid
+                    msg_len, msg_type, flags, seq, pid = struct.unpack('=LHHLL', msg[offset:offset+16])
+                    offset += 16
+
+                    if msg_len < 16:
+                        break
+
+                    # Process the message
+                    if msg_type == RTM_NEWLINK and not stop_event.is_set():
+                        # Parse interface message
+                        iface_msg = msg[offset:offset+msg_len-16]
+                        parse_interface_message(iface_msg)
+
+                    offset += msg_len - 16
+
+            except Exception as e:
+                if not stop_event.is_set():
+                    print(f"[monitor] Error receiving netlink message: {e}")
+                break
+
+    except Exception as e:
+        print(f"[monitor] Failed to start netlink socket: {e}")
+    finally:
+        try:
+            sock.close()
+        except:
+            pass
+        print("[monitor] Interface monitoring stopped")
+
+
+def parse_interface_message(iface_msg):
+    """Parse netlink interface message to extract interface name and state"""
+    try:
+        # Interface message header: family, type, index, flags, change
+        if len(iface_msg) < 2:
+            return
+
+        family, ifi_type, ifi_index, ifi_flags, ifi_change = struct.unpack('=BBHHH', iface_msg[:8])
+
+        # Skip if not an Ethernet-type interface (we're mainly interested in physical interfaces)
+        # Process attributes
+        offset = 8
+        ifname = None
+        operstate = None
+
+        while offset < len(iface_msg):
+            if offset + 4 > len(iface_msg):
+                break
+
+            attr_len, attr_type = struct.unpack('=HH', iface_msg[offset:offset+4])
+            offset += 4
+
+            if attr_len < 4 or offset + attr_len > len(iface_msg):
+                break
+
+            attr_value = iface_msg[offset:offset+attr_len-4]
+            offset += attr_len
+
+            if attr_type == IFLA_IFNAME:  # Interface name
+                ifname = attr_value.decode('utf-8', errors='ignore')
+            elif attr_type == IFLA_OPERSTATE and len(attr_value) >= 1:  # Operational state
+                operstate = struct.unpack('=B', attr_value[:1])[0]
+
+        # If we got an interface name and it's UP, check for solonet recovery
+        if ifname and operstate == IF_OPER_UP:
+            print(f"[monitor] Interface {ifname} is UP, checking for solonet recovery")
+            auto_recover_solonets(ifname)
+
+    except Exception as e:
+        print(f"[monitor] Error parsing interface message: {e}")
+
+
+def auto_recover_solonets(dev):
+    """Check if interface had a solonet and restore its configuration"""
+    try:
+        # Check if this device had a solonet before
+        if hasSolonet(dev):
+            # Get the namespace for this device
+            ns = get_namespace_for_dev(dev)
+            if ns is not None:
+                idx = extract_idx_from_ns(ns)
+
+                # Verify the namespace still exists
+                namespaces = list_multinet_namespaces()
+                if ns in namespaces:
+                    print(f"[auto-recover] Restoring solonet {ns} for interface {dev}")
+                    # Update host-side routing/NAT configuration
+                    update_host_routing(dev, idx)
+                else:
+                    print(f"[auto-recover] Namespace {ns} no longer exists for {dev}")
+            else:
+                print(f"[auto-recover] Could not find namespace for {dev}")
+        else:
+            # No solonet ever created for this device
+            pass
+    except Exception as e:
+        print(f"[auto-recover] Error recovering solonet for {dev}: {e}")
+
+
+def start_monitoring_daemon():
+    """Start the interface monitoring daemon in a background thread"""
+    stop_event = threading.Event()
+    monitor_thread = threading.Thread(target=monitor_interface_events, args=(stop_event,), daemon=True)
+    monitor_thread.start()
+    return stop_event, monitor_thread
+
+
+def stop_monitoring_daemon(stop_event, monitor_thread):
+    """Stop the interface monitoring daemon"""
+    if stop_event:
+        stop_event.set()
+    if monitor_thread and monitor_thread.is_alive():
+        monitor_thread.join(timeout=5.0)
+
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == "-a":
         dev = sys.argv[2]
@@ -589,22 +737,29 @@ def main():
         print("This program must be run as root (use sudo).")
         exit(1)
 
-    while True:
-        print("\nMenu:")
-        print("1. Create solonet")
-        print("2. Delete solonet")
-        print("3. Exit")
-        choice = input("Enter your choice: ")
-        
-        if choice == '1':
-            create_solonet()
-        elif choice == '2':
-            delete_solonet()
-        elif choice == '3':
-            print("Exiting...")
-            break
-        else:
-            print("Invalid choice. Please try again.")
+    # Start interface monitoring daemon
+    stop_event, monitor_thread = start_monitoring_daemon()
+
+    try:
+        while True:
+            print("\nMenu:")
+            print("1. Create solonet")
+            print("2. Delete solonet")
+            print("3. Exit")
+            choice = input("Enter your choice: ")
+
+            if choice == '1':
+                create_solonet()
+            elif choice == '2':
+                delete_solonet()
+            elif choice == '3':
+                print("Exiting...")
+                break
+            else:
+                print("Invalid choice. Please try again.")
+    finally:
+        # Clean up monitoring daemon
+        stop_monitoring_daemon(stop_event, monitor_thread)
 
 if __name__ == "__main__":
     main()
